@@ -27,6 +27,9 @@ class VersionStatus {
   /// The release notes for the store version of the app.
   final String? releaseNotes;
 
+  /// If present, an error occurred fetching the version status.
+  final String? error;
+
   /// Returns `true` if the store version of the application is greater than the local version.
   bool get canUpdate {
     final local = localVersion.split('.').map(int.parse).toList();
@@ -56,7 +59,13 @@ class VersionStatus {
     required this.storeVersion,
     required this.appStoreLink,
     this.releaseNotes,
+    this.error,
   });
+
+  String toString() {
+    return 'local: $localVersion, store: $storeVersion, canUpdate: $canUpdate,'
+        ' link: $appStoreLink, releaseNotes: "$releaseNotes", error: $error';
+  }
 }
 
 class NewVersion {
@@ -90,11 +99,13 @@ class NewVersion {
 
   /// This checks the version status, then displays a platform-specific alert
   /// with buttons to dismiss the update alert, or go to the app store.
-  showAlertIfNecessary({required BuildContext context}) async {
+  Future<VersionStatus?> showAlertIfNecessary(
+      {required BuildContext context}) async {
     final VersionStatus? versionStatus = await getVersionStatus();
     if (versionStatus != null && versionStatus.canUpdate) {
       showUpdateDialog(context: context, versionStatus: versionStatus);
     }
+    return versionStatus;
   }
 
   /// This checks the version status and returns the information. This is useful
@@ -150,8 +161,8 @@ class NewVersion {
   Future<VersionStatus?> _getAndroidStoreVersion(
       PackageInfo packageInfo) async {
     final id = androidId ?? packageInfo.packageName;
-    final uri =
-    Uri.https("play.google.com", "/store/apps/details", {"id": "$id", "hl": "en"});
+    final uri = Uri.https(
+        "play.google.com", "/store/apps/details", {"id": "$id", "hl": "en"});
     final response = await http.get(uri);
     if (response.statusCode != 200) {
       debugPrint('Can\'t find an app in the Play Store with the id: $id');
@@ -161,17 +172,18 @@ class NewVersion {
 
     String storeVersion = '0.0.0';
     String? releaseNotes;
+    String? error;
 
     final additionalInfoElements = document.getElementsByClassName('hAyfc');
     if (additionalInfoElements.isNotEmpty) {
       final versionElement = additionalInfoElements.firstWhere(
-            (elm) => elm.querySelector('.BgcNfc')!.text == 'Current Version',
+        (elm) => elm.querySelector('.BgcNfc')!.text == 'Current Version',
       );
       storeVersion = versionElement.querySelector('.htlgb')!.text;
 
       final sectionElements = document.getElementsByClassName('W4P4ne');
       final releaseNotesElement = sectionElements.firstWhereOrNull(
-            (elm) => elm.querySelector('.wSaTQd')!.text == 'What\'s New',
+        (elm) => elm.querySelector('.wSaTQd')!.text == 'What\'s New',
       );
       releaseNotes = releaseNotesElement
           ?.querySelector('.PHBdkd')
@@ -179,21 +191,34 @@ class NewVersion {
           ?.text;
     } else {
       final scriptElements = document.getElementsByTagName('script');
-      final infoScriptElement = scriptElements.firstWhere(
-            (elm) => elm.text.contains('key: \'ds:4\''),
-      );
+      bool found = false;
+      for (final key in ['ds:4', 'ds:6']) {
+        final infoScriptElement = scriptElements.firstWhere(
+          (elm) => elm.text.contains('key: \'$key\''),
+        );
 
-      final param = infoScriptElement.text.substring(20, infoScriptElement.text.length - 2)
-          .replaceAll('key:', '"key":')
-          .replaceAll('hash:', '"hash":')
-          .replaceAll('data:', '"data":')
-          .replaceAll('sideChannel:', '"sideChannel":')
-          .replaceAll('\'', '"');
-      final parsed = json.decode(param);
-      final data =  parsed['data'];
+        final param = infoScriptElement.text
+            .substring(20, infoScriptElement.text.length - 2)
+            .replaceAll('key:', '"key":')
+            .replaceAll('hash:', '"hash":')
+            .replaceAll('data:', '"data":')
+            .replaceAll('sideChannel:', '"sideChannel":')
+            .replaceAll('\'', '"');
+        final parsed = json.decode(param);
+        final List data = parsed['data'];
+        if (data.length == 0 || data[1].length < 3 || data[1][3].length < 145) {
+          continue;
+        }
 
-      storeVersion = data[1][2][140][0][0][0];
-      releaseNotes = data[1][2][144][1][1];
+        storeVersion = data[1][2][140][0][0][0];
+        releaseNotes = data[1][2][144][1][1];
+        found = true;
+        break;
+      }
+      if (!found) {
+        error = 'Unable to find the version information from the store. '
+            'Is it released for testing only?';
+      }
     }
 
     return VersionStatus._(
@@ -201,8 +226,10 @@ class NewVersion {
       storeVersion: _getCleanVersion(forceAppVersion ?? storeVersion),
       appStoreLink: uri.toString(),
       releaseNotes: releaseNotes,
+      error: error,
     );
   }
+
   /// Shows the user a platform-specific alert about the app update. The user
   /// can dismiss the alert or proceed to the app store.
   ///
